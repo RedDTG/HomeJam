@@ -42,15 +42,9 @@ function render() {
 function shell(title, subtitle, content) {
   app.innerHTML = `
     <section class="shell shell-${page}">
-      <nav class="nav">
-        <a href="/client">Invites</a>
-        <a href="/admin">Admin</a>
-        <a href="/visualizer">Visualizer</a>
-      </nav>
-      <header class="hero">
-        <p class="eyebrow">HomeJam</p>
-        <h1>${title}</h1>
-        <p>${subtitle}</p>
+      <header class="topline">
+        <span class="brand">HomeJam</span>
+        <span>${title}</span>
       </header>
       ${content}
     </section>`;
@@ -58,18 +52,22 @@ function shell(title, subtitle, content) {
 
 function renderClient() {
   shell(
-    "Ajoute le prochain morceau",
-    "Recherche iTunes, ajout instantane a la file, telechargement automatique cote serveur.",
-    `<section class="grid two">
-      <article class="panel">
+    "Invite",
+    "",
+    `<section class="grid two client-layout">
+      <article class="panel search-panel">
+        <div class="section-head">
+          <p>Recherche</p>
+          <span>iTunes metadata</span>
+        </div>
         <form id="searchForm" class="search">
-          <input id="searchInput" value="${escapeHtml(query)}" placeholder="Titre, artiste, album..." autocomplete="off">
-          <button>Rechercher</button>
+          <input id="searchInput" value="${escapeHtml(query)}" placeholder="Titre, artiste, album" autocomplete="off">
+          <button>Go</button>
         </form>
         <div class="results">${results.map(resultCard).join("") || empty("Lance une recherche pour proposer un morceau.")}</div>
       </article>
       <article class="panel compact">
-        <h2>File d'attente</h2>
+        <div class="section-head"><p>Queue</p><span>${state.queue.length} titre${state.queue.length > 1 ? "s" : ""}</span></div>
         ${queueList(false)}
       </article>
     </section>`
@@ -88,8 +86,8 @@ function renderAdmin() {
   const existingAudio = audio;
   const shouldKeepAudio = existingAudio && currentAudioId === current?.id;
   shell(
-    "Controle de la jam",
-    "Demarre la session, surveille les telechargements et laisse la lecture enchainer automatiquement.",
+    "Admin",
+    "",
     `<section class="grid admin-grid">
       <article class="panel now">
         <div class="cover-wrap"><img src="${current?.track.artwork || placeholder}" alt=""></div>
@@ -107,11 +105,11 @@ function renderAdmin() {
         </div>
       </article>
       <article class="panel">
-        <h2>Telechargements</h2>
+        <div class="section-head"><p>Downloads</p><span>yt-dlp</span></div>
         ${downloadList()}
       </article>
       <article class="panel queue-panel">
-        <h2>File</h2>
+        <div class="section-head"><p>Queue</p><span>${state.queue.length} titre${state.queue.length > 1 ? "s" : ""}</span></div>
         ${queueList(true)}
       </article>
     </section>`
@@ -133,16 +131,28 @@ function renderAdmin() {
 function renderVisualizer() {
   const current = state.current;
   shell(
-    current?.track.title || "En attente",
-    current ? `${current.track.artist} - ${current.track.album}` : "La prochaine musique apparaitra ici.",
+    "Visualizer",
+    "",
     `<section class="visual">
-      <div class="visual-cover"><img src="${current?.track.artwork || placeholder}" alt=""></div>
-      <aside class="panel glass">
-        <h2>A suivre</h2>
+      <article class="visual-main">
+        <div class="visual-cover"><img src="${current?.track.artwork || placeholder}" alt=""></div>
+        <div class="visual-info">
+          <p>${escapeHtml(current?.track.artist || "HomeJam")}</p>
+          <h1>${escapeHtml(current?.track.title || "En attente")}</h1>
+          <span>${escapeHtml(current?.track.album || "La prochaine musique apparaitra ici")}</span>
+        </div>
+        ${waveform()}
+      </article>
+      <aside class="panel glass visual-queue">
+        <div class="section-head"><p>A suivre</p><span>${state.queue.length}</span></div>
         ${queueList(false)}
       </aside>
     </section>`
   );
+}
+
+function waveform() {
+  return `<div class="wave" aria-hidden="true">${Array.from({ length: 32 }, (_, index) => `<span style="--i:${index}"></span>`).join("")}</div>`;
 }
 
 function bindSearch() {
