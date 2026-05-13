@@ -24,11 +24,31 @@ Open `http://localhost:3000/admin` on the machine connected to the speakers. Gue
 
 Downloaded tracks are stored in `media/`; jam state is stored in `data/state.json`.
 
+## Run with Docker Compose
+
+```sh
+docker compose up --build -d
+```
+
+The container includes Node.js, `yt-dlp`, and `ffmpeg`. The app is exposed on `http://localhost:3000` by default.
+
+Persistent folders are mounted from the host:
+
+- `./data` -> jam state
+- `./media` -> downloaded tracks
+
+You can change the host port with `PORT` in `.env`, for example:
+
+```env
+PORT=8080
+```
+
 ## Environment
 
 Create `.env` from `.env.example` and adjust paths if needed:
 
 ```env
+PORT=3000
 YTDLP_PATH=..\yt-dlp_x86.exe
 FFMPEG_PATH=tools\ffmpeg\bin
 PRIMARY_COLOR=#b8f6d0

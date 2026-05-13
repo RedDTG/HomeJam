@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+media
+tools
+.git
+.env
+.playwright-mcp
+npm-debug.log*
+Dockerfile
+docker-compose.yml

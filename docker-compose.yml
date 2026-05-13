@@ -1,0 +1,16 @@
+services:
+  homejam:
+    build: .
+    container_name: homejam
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      YTDLP_PATH: ${YTDLP_PATH:-yt-dlp}
+      FFMPEG_PATH: ${FFMPEG_PATH:-/usr/bin}
+      PRIMARY_COLOR: "${PRIMARY_COLOR:-#b8f6d0}"
+      PRIMARY_COLOR_FROM_ARTWORK: "${PRIMARY_COLOR_FROM_ARTWORK:-false}"
+    volumes:
+      - ./data:/app/data
+      - ./media:/app/media
