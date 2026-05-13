@@ -59,6 +59,8 @@ const mediaDir = join(rootDir, "media");
 const dbPath = join(dataDir, "state.json");
 const ytdlpPath = resolveConfiguredPath(process.env.YTDLP_PATH?.trim() || "yt-dlp");
 const ffmpegPath = process.env.FFMPEG_PATH?.trim() ? resolveConfiguredPath(process.env.FFMPEG_PATH.trim()) : undefined;
+const primaryColor = parseHexColor(process.env.PRIMARY_COLOR?.trim() || "#b8f6d0");
+const primaryColorFromArtwork = parseBoolean(process.env.PRIMARY_COLOR_FROM_ARTWORK);
 
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(mediaDir, { recursive: true });
@@ -72,6 +74,7 @@ const initialState: JamState = {
 };
 
 const state: JamState = loadState();
+let lastVisualizerLevels: number[] = [];
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -88,6 +91,13 @@ const server = app.listen(Number(process.env.PORT ?? 3000), () => {
 const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (socket) => {
   socket.send(JSON.stringify({ type: "state", state: publicState() }));
+  if (lastVisualizerLevels.length) socket.send(JSON.stringify({ type: "visualizer", levels: lastVisualizerLevels }));
+  socket.on("message", (payload) => {
+    const message = parseSocketMessage(payload.toString());
+    if (message?.type !== "visualizer") return;
+    lastVisualizerLevels = message.levels;
+    broadcast(JSON.stringify(message));
+  });
 });
 
 app.get("/", (_request, response) => response.redirect("/client"));
@@ -201,6 +211,7 @@ function loadState(): JamState {
 
 function renderPage(page: string): string {
   const title = page === "admin" ? "HomeJam Admin" : page === "visualizer" ? "HomeJam Visualizer" : "HomeJam";
+  const [red, green, blue] = primaryColor.rgb;
   return `<!doctype html>
 <html lang="fr">
 <head>
@@ -209,11 +220,25 @@ function renderPage(page: string): string {
   <title>${title}</title>
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
-<body data-page="${page}">
+<body data-page="${page}" data-primary-color-from-artwork="${primaryColorFromArtwork}" style="--primary-color:${primaryColor.hex};--primary-color-rgb:${red}, ${green}, ${blue};">
   <main id="app"></main>
   <script type="module" src="/assets/app.js"></script>
 </body>
 </html>`;
+}
+
+function parseHexColor(value: string): { hex: string; rgb: [number, number, number] } {
+  const match = value.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) return { hex: "#b8f6d0", rgb: [184, 246, 208] };
+  const normalized = match[1].length === 3 ? match[1].split("").map((char) => `${char}${char}`).join("") : match[1];
+  const red = Number.parseInt(normalized.slice(0, 2), 16);
+  const green = Number.parseInt(normalized.slice(2, 4), 16);
+  const blue = Number.parseInt(normalized.slice(4, 6), 16);
+  return { hex: `#${normalized.toLowerCase()}`, rgb: [red, green, blue] };
+}
+
+function parseBoolean(value: string | undefined): boolean {
+  return ["1", "true", "yes", "on"].includes(value?.trim().toLowerCase() || "");
 }
 
 function toTrack(item: ItunesResult): Track {
@@ -365,9 +390,22 @@ function publicState(): JamState {
   return state;
 }
 
+function parseSocketMessage(value: string): { type: "visualizer"; levels: number[] } | null {
+  try {
+    const parsed = JSON.parse(value) as { type?: unknown; levels?: unknown };
+    if (parsed.type !== "visualizer" || !Array.isArray(parsed.levels)) return null;
+    return { type: "visualizer", levels: parsed.levels.map(Number).filter(Number.isFinite).slice(0, 64) };
+  } catch {
+    return null;
+  }
+}
+
 function persistAndBroadcast(): void {
   writeFileSync(dbPath, JSON.stringify(state, null, 2));
-  const payload = JSON.stringify({ type: "state", state: publicState() });
+  broadcast(JSON.stringify({ type: "state", state: publicState() }));
+}
+
+function broadcast(payload: string): void {
   for (const client of wss.clients) {
     if (client.readyState === client.OPEN) client.send(payload);
   }

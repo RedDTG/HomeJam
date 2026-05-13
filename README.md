@@ -31,4 +31,9 @@ Create `.env` from `.env.example` and adjust paths if needed:
 ```env
 YTDLP_PATH=..\yt-dlp_x86.exe
 FFMPEG_PATH=tools\ffmpeg\bin
+PRIMARY_COLOR=#b8f6d0
+PRIMARY_COLOR_FROM_ARTWORK=false
 ```
+
+`PRIMARY_COLOR` controls the main accent color used by existing colored elements such as buttons, status labels, progress bars, focus rings, and visualizer bars. Use a hex color (`#rgb` or `#rrggbb`).
+Set `PRIMARY_COLOR_FROM_ARTWORK=true` to derive that accent color from the dominant color of the current track artwork. `PRIMARY_COLOR` remains the fallback when no artwork color can be extracted.
