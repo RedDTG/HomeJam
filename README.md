@@ -8,7 +8,7 @@ Self-hosted music jam app with three web surfaces:
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 24+
 - `yt-dlp` configured through `YTDLP_PATH` in `.env`
 - `ffmpeg` configured through `FFMPEG_PATH` in `.env`
 
@@ -30,7 +30,7 @@ Downloaded tracks are stored in `media/`; jam state is stored in `data/state.jso
 docker compose up --build -d
 ```
 
-The container includes Node.js, `yt-dlp`, and `ffmpeg`. The app is exposed on `http://localhost:3000` by default.
+The container includes Node.js 24, `yt-dlp`, and `ffmpeg`. The app is exposed on `http://localhost:3000` by default.
 
 Persistent folders are mounted from the host:
 

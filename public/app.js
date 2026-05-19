@@ -6,6 +6,7 @@ let results = [];
 let query = "";
 let audio;
 let socket;
+let statePoll;
 let currentAudioId = null;
 let adminAudioContext;
 let adminAnalyser;
@@ -18,10 +19,11 @@ let primaryArtwork = "";
 const primaryColorFromArtwork = document.body.dataset.primaryColorFromArtwork === "true";
 
 const placeholder = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 600 600'%3E%3Crect width='600' height='600' fill='%2316161d'/%3E%3Cpath d='M395 145v236a78 78 0 1 1-32-63V218l-164 33v163a78 78 0 1 1-32-63V203z' fill='%2372f2a1'/%3E%3C/svg%3E";
-const visualizerBarCount = 32;
+const visualizerBarCount = 28;
 
 connect();
 loadState();
+startStatePolling();
 
 function connect() {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
@@ -34,11 +36,19 @@ function connect() {
       render();
       syncAudio();
     } else if (message.type === "visualizer") {
-      visualLevels = Array.isArray(message.levels) ? message.levels : [];
+      visualLevels = Array.isArray(message.levels) ? message.levels.slice(0, visualizerBarCount) : [];
     }
   });
   socket.addEventListener("open", startAdminVisualizer);
+  socket.addEventListener("error", () => socket.close());
   socket.addEventListener("close", () => setTimeout(connect, 1000));
+}
+
+function startStatePolling() {
+  if (statePoll) clearInterval(statePoll);
+  statePoll = setInterval(() => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) loadState();
+  }, 2000);
 }
 
 async function loadState() {

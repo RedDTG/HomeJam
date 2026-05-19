@@ -1,10 +1,21 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname, extname, isAbsolute, join, normalize as normalizePath, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import express from "express";
-import { WebSocketServer } from "ws";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createRequire } from "node:module";
+import type { Duplex } from "node:stream";
+import { WebSocket, WebSocketServer } from "ws";
+
+type NextServer = {
+  didWebSocketSetup?: boolean;
+  getRequestHandler(): (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+  getUpgradeHandler(): (request: IncomingMessage, socket: Duplex, head: Buffer) => Promise<void>;
+  prepare(): Promise<void>;
+};
+
+type CreateNextServer = (options: { dev: boolean; dir: string }) => NextServer;
 
 type Track = {
   id: string;
@@ -50,6 +61,8 @@ type ItunesResult = {
 };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const createNextServer = require("next") as CreateNextServer;
 const rootDir = resolve(__dirname, "..");
 loadEnvFile(join(rootDir, ".env"));
 
@@ -59,8 +72,6 @@ const mediaDir = join(rootDir, "media");
 const dbPath = join(dataDir, "state.json");
 const ytdlpPath = resolveConfiguredPath(process.env.YTDLP_PATH?.trim() || "yt-dlp");
 const ffmpegPath = process.env.FFMPEG_PATH?.trim() ? resolveConfiguredPath(process.env.FFMPEG_PATH.trim()) : undefined;
-const primaryColor = parseHexColor(process.env.PRIMARY_COLOR?.trim() || "#b8f6d0");
-const primaryColorFromArtwork = parseBoolean(process.env.PRIMARY_COLOR_FROM_ARTWORK);
 
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(mediaDir, { recursive: true });
@@ -76,19 +87,10 @@ const initialState: JamState = {
 const state: JamState = loadState();
 let lastVisualizerLevels: number[] = [];
 
-const app = express();
-app.use(express.json({ limit: "1mb" }));
-app.use("/assets", express.static(publicDir));
-app.use("/media", express.static(mediaDir, { acceptRanges: true }));
-app.get("/favicon.ico", (_request, response) => response.status(204).end());
+const nextApp = createNextServer({ dev: process.env.NODE_ENV !== "production", dir: rootDir });
+const nextHandler = nextApp.getRequestHandler();
+const wss = new WebSocketServer({ noServer: true });
 
-const server = app.listen(Number(process.env.PORT ?? 3000), () => {
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : 3000;
-  console.log(`HomeJam listening on http://localhost:${port}`);
-});
-
-const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (socket) => {
   socket.send(JSON.stringify({ type: "state", state: publicState() }));
   if (lastVisualizerLevels.length) socket.send(JSON.stringify({ type: "visualizer", levels: lastVisualizerLevels }));
@@ -100,98 +102,294 @@ wss.on("connection", (socket) => {
   });
 });
 
-app.get("/", (_request, response) => response.redirect("/client"));
-app.get(["/admin", "/client", "/visualizer"], (request, response) => {
-  const page = request.path.slice(1);
-  response.send(renderPage(page));
+await nextApp.prepare();
+const nextUpgradeHandler = nextApp.getUpgradeHandler();
+nextApp.didWebSocketSetup = true;
+
+const server = createServer(async (request, response) => {
+  try {
+    if (!request.url) {
+      response.statusCode = 400;
+      response.end();
+      return;
+    }
+
+    const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+    if (await handleRequest(request, response, url)) return;
+    await nextHandler(request, response);
+  } catch (error) {
+    console.error(error);
+    if (!response.headersSent) sendJson(response, 500, { error: "Internal server error" });
+    else response.end();
+  }
 });
 
-app.get("/api/state", (_request, response) => response.json(publicState()));
-
-app.get("/api/search", async (request, response) => {
-  const term = String(request.query.q ?? "").trim();
-  if (term.length < 2) {
-    response.json([]);
+server.on("upgrade", (request, socket, head) => {
+  if (!request.url) {
+    socket.destroy();
     return;
   }
-
-  const params = new URLSearchParams({ term, media: "music", entity: "song", limit: "12", country: "FR" });
-  const apiResponse = await fetch(`https://itunes.apple.com/search?${params.toString()}`);
-  if (!apiResponse.ok) {
-    response.status(502).json({ error: "iTunes search failed" });
+  const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+  if (url.pathname !== "/ws") {
+    nextUpgradeHandler(request, socket, head).catch(() => socket.destroy());
     return;
   }
-  const payload = (await apiResponse.json()) as { results?: ItunesResult[] };
-  response.json((payload.results ?? []).filter((item) => item.trackName && item.artistName).map(toTrack));
+  wss.handleUpgrade(request, socket, head, (websocket) => wss.emit("connection", websocket, request));
 });
 
-app.post("/api/jam/start", (_request, response) => {
-  state.running = true;
-  promoteNextReadyTrack();
-  persistAndBroadcast();
-  response.json(publicState());
+server.listen(Number(process.env.PORT ?? 3000), () => {
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 3000;
+  console.log(`HomeJam listening on http://localhost:${port}`);
 });
 
-app.post("/api/jam/stop", (_request, response) => {
-  state.running = false;
-  persistAndBroadcast();
-  response.json(publicState());
-});
+async function handleRequest(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
+  if (request.method === "GET" && url.pathname === "/") {
+    response.writeHead(302, { Location: "/client" });
+    response.end();
+    return true;
+  }
+  if (request.method === "GET" && url.pathname === "/favicon.ico") {
+    response.statusCode = 204;
+    response.end();
+    return true;
+  }
+  if (request.method === "GET" && url.pathname.startsWith("/assets/")) return serveFile(response, publicDir, url.pathname.slice("/assets/".length));
+  if (request.method === "GET" && url.pathname.startsWith("/media/")) return serveFile(response, mediaDir, url.pathname.slice("/media/".length), request.headers.range);
+  if (url.pathname.startsWith("/api/")) return handleApi(request, response, url);
+  return false;
+}
 
-app.post("/api/queue", async (request, response) => {
-  const track = parseTrack(request.body);
-  if (!track) {
-    response.status(400).json({ error: "Invalid track" });
-    return;
+async function handleApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
+  if (request.method === "GET" && url.pathname === "/api/state") {
+    sendJson(response, 200, publicState());
+    return true;
   }
 
-  const libraryKey = getLibraryKey(track);
-  const item: QueueItem = {
-    id: randomUUID(),
-    track: { ...track, localPath: state.library[libraryKey] },
-    status: state.library[libraryKey] ? "ready" : "downloading",
-    requestedAt: Date.now(),
-    progress: state.library[libraryKey] ? 100 : 0,
-  };
+  if (request.method === "GET" && url.pathname === "/api/search") {
+    const term = String(url.searchParams.get("q") ?? "").trim();
+    if (term.length < 2) {
+      sendJson(response, 200, []);
+      return true;
+    }
 
-  state.queue.push(item);
-  persistAndBroadcast();
+    const params = new URLSearchParams({ term, media: "music", entity: "song", limit: "12", country: "FR" });
+    const apiResponse = await fetch(`https://itunes.apple.com/search?${params.toString()}`);
+    if (!apiResponse.ok) {
+      sendJson(response, 502, { error: "iTunes search failed" });
+      return true;
+    }
+    const payload = (await apiResponse.json()) as { results?: ItunesResult[] };
+    sendJson(response, 200, (payload.results ?? []).filter((item) => item.trackName && item.artistName).map(toTrack));
+    return true;
+  }
 
-  if (item.status === "ready") {
+  if (request.method === "POST" && url.pathname === "/api/jam/start") {
+    state.running = true;
     promoteNextReadyTrack();
     persistAndBroadcast();
-  } else {
-    downloadTrack(item, libraryKey).catch((error: unknown) => failDownload(item, error));
+    sendJson(response, 200, publicState());
+    return true;
   }
 
-  response.status(201).json(item);
-});
+  if (request.method === "POST" && url.pathname === "/api/jam/stop") {
+    state.running = false;
+    persistAndBroadcast();
+    sendJson(response, 200, publicState());
+    return true;
+  }
 
-app.post("/api/player/ended", (_request, response) => {
-  state.current = null;
-  promoteNextReadyTrack();
-  persistAndBroadcast();
-  response.json(publicState());
-});
+  if (request.method === "POST" && url.pathname === "/api/queue") {
+    const body = await readJsonBody(request);
+    if (body === tooLargeBody) {
+      sendJson(response, 413, { error: "Payload too large" });
+      return true;
+    }
+    const track = parseTrack(body);
+    if (!track) {
+      sendJson(response, 400, { error: "Invalid track" });
+      return true;
+    }
 
-app.post("/api/player/skip", (_request, response) => {
-  state.current = null;
-  promoteNextReadyTrack();
-  persistAndBroadcast();
-  response.json(publicState());
-});
+    const libraryKey = getLibraryKey(track);
+    const item: QueueItem = {
+      id: randomUUID(),
+      track: { ...track, localPath: state.library[libraryKey] },
+      status: state.library[libraryKey] ? "ready" : "downloading",
+      requestedAt: Date.now(),
+      progress: state.library[libraryKey] ? 100 : 0,
+    };
 
-app.delete("/api/queue/:id", (request, response) => {
-  state.queue = state.queue.filter((item) => item.id !== request.params.id);
-  persistAndBroadcast();
-  response.status(204).end();
-});
+    state.queue.push(item);
+    persistAndBroadcast();
 
-app.delete("/api/queue", (_request, response) => {
-  state.queue = state.queue.filter((item) => item.status === "downloading");
-  persistAndBroadcast();
-  response.status(204).end();
-});
+    if (item.status === "ready") {
+      promoteNextReadyTrack();
+      persistAndBroadcast();
+    } else {
+      downloadTrack(item, libraryKey).catch((error: unknown) => failDownload(item, error));
+    }
+
+    sendJson(response, 201, item);
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/player/ended") {
+    state.current = null;
+    promoteNextReadyTrack();
+    persistAndBroadcast();
+    sendJson(response, 200, publicState());
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/player/skip") {
+    state.current = null;
+    promoteNextReadyTrack();
+    persistAndBroadcast();
+    sendJson(response, 200, publicState());
+    return true;
+  }
+
+  const queueItemMatch = url.pathname.match(/^\/api\/queue\/([^/]+)$/);
+  if (request.method === "DELETE" && queueItemMatch) {
+    state.queue = state.queue.filter((item) => item.id !== queueItemMatch[1]);
+    persistAndBroadcast();
+    response.statusCode = 204;
+    response.end();
+    return true;
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/queue") {
+    state.queue = state.queue.filter((item) => item.status === "downloading");
+    persistAndBroadcast();
+    response.statusCode = 204;
+    response.end();
+    return true;
+  }
+
+  response.statusCode = 404;
+  response.end();
+  return true;
+}
+
+function serveFile(response: ServerResponse, baseDir: string, pathPart: string, range?: string): boolean {
+  let relativePath: string;
+  try {
+    relativePath = decodeURIComponent(pathPart);
+  } catch {
+    response.statusCode = 400;
+    response.end();
+    return true;
+  }
+  const filePath = resolve(baseDir, normalizePath(relativePath));
+  if (!isPathInside(filePath, baseDir) || !existsSync(filePath)) {
+    response.statusCode = 404;
+    response.end();
+    return true;
+  }
+
+  const stats = statSync(filePath);
+  if (!stats.isFile()) {
+    response.statusCode = 404;
+    response.end();
+    return true;
+  }
+
+  const headers: Record<string, string | number> = {
+    "Content-Type": contentType(filePath),
+    "Content-Length": stats.size,
+  };
+
+  if (!range) {
+    response.writeHead(200, headers);
+    createReadStream(filePath).pipe(response);
+    return true;
+  }
+
+  const match = range.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) {
+    response.writeHead(416, { "Content-Range": `bytes */${stats.size}` });
+    response.end();
+    return true;
+  }
+
+  const suffixLength = !match[1] && match[2] ? Number(match[2]) : undefined;
+  const start = suffixLength ? Math.max(0, stats.size - suffixLength) : match[1] ? Number(match[1]) : 0;
+  const end = suffixLength ? stats.size - 1 : match[2] ? Number(match[2]) : stats.size - 1;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || end >= stats.size) {
+    response.writeHead(416, { "Content-Range": `bytes */${stats.size}` });
+    response.end();
+    return true;
+  }
+
+  response.writeHead(206, {
+    ...headers,
+    "Accept-Ranges": "bytes",
+    "Content-Range": `bytes ${start}-${end}/${stats.size}`,
+    "Content-Length": end - start + 1,
+  });
+  createReadStream(filePath, { start, end }).pipe(response);
+  return true;
+}
+
+function isPathInside(filePath: string, baseDir: string): boolean {
+  const base = resolve(baseDir);
+  return filePath === base || filePath.startsWith(`${base}${sep}`);
+}
+
+function contentType(filePath: string): string {
+  const extension = extname(filePath).toLowerCase();
+  if (extension === ".css") return "text/css; charset=utf-8";
+  if (extension === ".js") return "text/javascript; charset=utf-8";
+  if (extension === ".mp3") return "audio/mpeg";
+  if (extension === ".webm") return "audio/webm";
+  if (extension === ".m4a") return "audio/mp4";
+  if (extension === ".wav") return "audio/wav";
+  return "application/octet-stream";
+}
+
+function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
+  const body = JSON.stringify(payload);
+  response.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+  });
+  response.end(body);
+}
+
+const tooLargeBody = Symbol("tooLargeBody");
+
+function readJsonBody(request: IncomingMessage): Promise<unknown | typeof tooLargeBody> {
+  return new Promise((resolvePromise) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let resolved = false;
+    request.on("data", (chunk: Buffer) => {
+      if (resolved) return;
+      size += chunk.length;
+      if (size > 1024 * 1024) {
+        resolved = true;
+        resolvePromise(tooLargeBody);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      if (resolved) return;
+      resolved = true;
+      try {
+        resolvePromise(JSON.parse(Buffer.concat(chunks).toString("utf8") || "null"));
+      } catch {
+        resolvePromise(null);
+      }
+    });
+    request.on("error", () => {
+      if (resolved) return;
+      resolved = true;
+      resolvePromise(null);
+    });
+  });
+}
 
 function loadState(): JamState {
   if (!existsSync(dbPath)) return { ...initialState };
@@ -207,38 +405,6 @@ function loadState(): JamState {
   } catch {
     return { ...initialState };
   }
-}
-
-function renderPage(page: string): string {
-  const title = page === "admin" ? "HomeJam Admin" : page === "visualizer" ? "HomeJam Visualizer" : "HomeJam";
-  const [red, green, blue] = primaryColor.rgb;
-  return `<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${title}</title>
-  <link rel="stylesheet" href="/assets/styles.css">
-</head>
-<body data-page="${page}" data-primary-color-from-artwork="${primaryColorFromArtwork}" style="--primary-color:${primaryColor.hex};--primary-color-rgb:${red}, ${green}, ${blue};">
-  <main id="app"></main>
-  <script type="module" src="/assets/app.js"></script>
-</body>
-</html>`;
-}
-
-function parseHexColor(value: string): { hex: string; rgb: [number, number, number] } {
-  const match = value.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
-  if (!match) return { hex: "#b8f6d0", rgb: [184, 246, 208] };
-  const normalized = match[1].length === 3 ? match[1].split("").map((char) => `${char}${char}`).join("") : match[1];
-  const red = Number.parseInt(normalized.slice(0, 2), 16);
-  const green = Number.parseInt(normalized.slice(2, 4), 16);
-  const blue = Number.parseInt(normalized.slice(4, 6), 16);
-  return { hex: `#${normalized.toLowerCase()}`, rgb: [red, green, blue] };
-}
-
-function parseBoolean(value: string | undefined): boolean {
-  return ["1", "true", "yes", "on"].includes(value?.trim().toLowerCase() || "");
 }
 
 function toTrack(item: ItunesResult): Track {
@@ -353,7 +519,7 @@ function loadEnvFile(path: string): void {
     const key = trimmed.slice(0, separator).trim();
     const rawValue = trimmed.slice(separator + 1).trim();
     if (!key || process.env[key]) continue;
-    process.env[key] = rawValue.replace(/^['\"]|['\"]$/g, "");
+    process.env[key] = rawValue.replace(/^[\'"]|[\'"]$/g, "");
   }
 }
 
@@ -407,6 +573,6 @@ function persistAndBroadcast(): void {
 
 function broadcast(payload: string): void {
   for (const client of wss.clients) {
-    if (client.readyState === client.OPEN) client.send(payload);
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
   }
 }
