@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import "./globals.css";
 
 type Page = "admin" | "client" | "visualizer";
 
@@ -29,7 +30,6 @@ export function HomeJamDocument({ page, children }: { page: Page; children: Reac
     <html lang="fr">
       <head>
         <title>{titleForPage(page)}</title>
-        <link rel="stylesheet" href="/assets/styles.css" />
       </head>
       <body
         data-page={page}
