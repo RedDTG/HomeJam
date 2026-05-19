@@ -45,11 +45,3 @@ export function HomeJamDocument({ page, children }: { page: Page; children: Reac
   );
 }
 
-export function HomeJamPage() {
-  return (
-    <>
-      <main id="app" suppressHydrationWarning />
-      <script type="module" src="/assets/app.js" suppressHydrationWarning />
-    </>
-  );
-}
